@@ -72,12 +72,18 @@ Examples:
         help="Calculate all metrics"
     )
     
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Evaluate metrics only on foreground regions (auto-cropped and masked)"
+    )
+    
     # Optional outputs
     parser.add_argument(
         "--save-mask",
         type=str,
         default=None,
-        help="Path to save the foreground mask as NIfTI file"
+        help="Path to save the foreground mask as NIfTI file (only used with --foreground)"
     )
     parser.add_argument(
         "--dim",
@@ -189,32 +195,57 @@ def main(args: List[str] = None) -> int:
         # Validate shapes
         validate_shapes(ref_data, img_data)
         
-        # Auto-crop based on reference
-        print("Auto-cropping volumes based on reference...")
-        ref_cropped, img_cropped, bbox = auto_crop_volumes(ref_data, img_data)
-        crop_info = get_crop_info(bbox, ref_data.shape)
-        print(f"  Original shape: {crop_info['original_shape']}")
-        print(f"  Cropped shape: {crop_info['cropped_shape']}")
-        print(f"  X range: {crop_info['x_range']}")
-        print(f"  Y range: {crop_info['y_range']}")
-        print(f"  Z range: {crop_info['z_range']}")
+        ref_final = ref_data
+        img_final = img_data
+        mask = None
+        
+        if parsed.foreground:
+            # Auto-crop based on reference
+            print("Auto-cropping volumes based on reference...")
+            ref_final, img_final, bbox = auto_crop_volumes(ref_data, img_data)
+            crop_info = get_crop_info(bbox, ref_data.shape)
+            print(f"  Original shape: {crop_info['original_shape']}")
+            print(f"  Cropped shape: {crop_info['cropped_shape']}")
+            print(f"  X range: {crop_info['x_range']}")
+            print(f"  Y range: {crop_info['y_range']}")
+            print(f"  Z range: {crop_info['z_range']}")
+        else:
+            print("Using full volumes (no cropping)...")
         
         # Normalize both images to 0-1 range
         print("Normalizing images to 0-1 range...")
-        ref_normalized = normalize_to_range(ref_cropped, 0, 1)
-        img_normalized = normalize_to_range(img_cropped, 0, 1)
-        print(f"  Reference range: [{ref_cropped.min():.2f}, {ref_cropped.max():.2f}] -> [0, 1]")
-        print(f"  Image range: [{img_cropped.min():.2f}, {img_cropped.max():.2f}] -> [0, 1]")
+        ref_normalized = normalize_to_range(ref_final, 0, 1)
+        img_normalized = normalize_to_range(img_final, 0, 1)
+        print(f"  Reference range: [{ref_final.min():.2f}, {ref_final.max():.2f}] -> [0, 1]")
+        print(f"  Image range: [{img_final.min():.2f}, {img_final.max():.2f}] -> [0, 1]")
         
-        # Create foreground mask (non-air regions based on reference)
-        print("Creating foreground mask (excluding air regions)...")
-        mask = create_foreground_mask(ref_normalized, threshold_ratio=0.1)
-        fg_percentage = 100 * mask.sum() / mask.size
-        print(f"  Foreground pixels: {mask.sum():,} / {mask.size:,} ({fg_percentage:.1f}%)")
+        if parsed.foreground:
+            # Create foreground mask (non-air regions based on reference)
+            print("Creating foreground mask (excluding air regions)...")
+            mask = create_foreground_mask(ref_normalized, threshold_ratio=0.1)
+            fg_percentage = 100 * mask.sum() / mask.size
+            print(f"  Foreground pixels: {mask.sum():,} / {mask.size:,} ({fg_percentage:.1f}%)")
+            
+            # Save mask if requested
+            if parsed.save_mask:
+                print(f"Saving mask to: {parsed.save_mask}")
+                # Load reference to get affine and header
+                ref_nii = nib.load(parsed.reference)
+                # We need to account for cropping if we want to save the mask in original space, 
+                # but illustrating the cropped mask is usually what's intended here or we'd need to un-crop.
+                # For simplicity and correctness with the metrics, let's save what was used.
+                # Note: The original code saved the mask which was cropped.
+                mask_nii = nib.Nifti1Image(mask.astype(np.uint8), ref_nii.affine, ref_nii.header)
+                nib.save(mask_nii, parsed.save_mask)
+                print(f"  Mask saved successfully")
         
-        # Compute metrics only on foreground regions
+        # Compute metrics
         dim_names = {0: "sagittal", 1: "coronal", 2: "axial"}
-        print(f"Computing metrics on foreground regions (slicing on {dim_names[parsed.dim]} dimension)...")
+        if parsed.foreground:
+            print(f"Computing metrics on foreground regions (slicing on {dim_names[parsed.dim]} dimension)...")
+        else:
+            print(f"Computing metrics on full volume (slicing on {dim_names[parsed.dim]} dimension)...")
+            
         results = compute_metrics(
             ref_normalized, img_normalized,
             mask=mask,
@@ -225,15 +256,6 @@ def main(args: List[str] = None) -> int:
             lpips=parsed.lpips,
             all_metrics=parsed.all
         )
-        
-        # Save mask if requested
-        if parsed.save_mask:
-            print(f"Saving mask to: {parsed.save_mask}")
-            # Load reference to get affine and header
-            ref_nii = nib.load(parsed.reference)
-            mask_nii = nib.Nifti1Image(mask.astype(np.uint8), ref_nii.affine, ref_nii.header)
-            nib.save(mask_nii, parsed.save_mask)
-            print(f"  Mask saved successfully")
         
         # Write to CSV
         write_csv(parsed.output, parsed.reference, parsed.image, results)
