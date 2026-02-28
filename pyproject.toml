@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "niimetric"
-version = "0.1.5"
+version = "0.1.6"
 description = "Evaluate image quality metrics (SSIM, MAE, LPIPS, PSNR) for NIfTI images"
 readme = "README.md"
 license = {text = "MIT"}
