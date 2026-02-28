@@ -227,3 +227,110 @@ def compute_lpips(ref: np.ndarray, img: np.ndarray, mask: Optional[np.ndarray] =
     
     # Weighted average by foreground pixel count
     return float(np.average(lpips_values, weights=weights))
+
+
+def compute_tsnr(
+    img: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    dim: int = 2,
+) -> float:
+    """
+    Compute Temporal Signal-to-Noise Ratio (tSNR).
+
+    Treats the 3D volume as a pseudo-temporal sequence of 2D slices stacked
+    along ``dim``.  For every spatial position across the slice stack the
+    local "temporal" mean and standard deviation are computed; tSNR is then
+    the voxel-wise mean / std ratio, averaged over all (foreground) voxels.
+
+    A high tSNR indicates low slice-to-slice noise relative to the signal
+    level.  This is a no-reference metric.
+
+    Args:
+        img:  3D image volume (H × W × D or similar ordering).
+        mask: Optional binary mask selecting foreground voxels.
+              Applied to the 2-D spatial dimensions that are *not* ``dim``.
+        dim:  Axis treated as the "temporal" (slice) direction.
+              0 = sagittal, 1 = coronal, 2 = axial (default).
+
+    Returns:
+        Mean tSNR value (higher is better).
+    """
+    # Move the "temporal" axis to position 0 so shape is (T, *spatial)
+    vol = np.moveaxis(img, dim, 0).astype(np.float64)  # (T, A, B)
+
+    temporal_mean = vol.mean(axis=0)   # (A, B)
+    temporal_std  = vol.std(axis=0)    # (A, B)
+
+    # Avoid division by zero: only compute where std > 0
+    valid = temporal_std > 0
+    if mask is not None:
+        # Project mask onto the two remaining spatial axes
+        spatial_mask = np.moveaxis(mask, dim, 0)
+        # Collapse across the temporal axis to get a 2-D spatial mask
+        spatial_mask_2d = spatial_mask.any(axis=0) if spatial_mask.ndim == 3 else spatial_mask
+        valid = valid & spatial_mask_2d
+
+    if not valid.any():
+        return 0.0
+
+    tsnr_map = temporal_mean[valid] / temporal_std[valid]
+    return float(tsnr_map.mean())
+
+
+def compute_flickering_index(
+    img: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    dim: int = 2,
+) -> float:
+    """
+    Compute Temporal Flickering Index (TFI).
+
+    Measures slice-to-slice intensity variability as the mean absolute
+    difference between consecutive slices, normalised by the overall mean
+    intensity.  Lower values indicate smoother, more consistent slice
+    transitions; higher values indicate "flickering" artefacts.
+
+    This is a no-reference metric.
+
+    Args:
+        img:  3D image volume.
+        mask: Optional binary mask.  Per-slice foreground pixels only are
+              used when computing the mean absolute difference.
+        dim:  Axis along which consecutive slices are compared.
+              0 = sagittal, 1 = coronal, 2 = axial (default).
+
+    Returns:
+        Flickering index (lower is better; 0 = perfectly uniform).
+    """
+    vol = np.moveaxis(img, dim, 0).astype(np.float64)  # (T, A, B)
+    n_slices = vol.shape[0]
+
+    if n_slices < 2:
+        return 0.0
+
+    # Build a spatial mask projected to (A, B)
+    if mask is not None:
+        spatial_mask = np.moveaxis(mask, dim, 0)
+        spatial_mask_2d = spatial_mask.any(axis=0) if spatial_mask.ndim == 3 else spatial_mask
+    else:
+        spatial_mask_2d = np.ones(vol.shape[1:], dtype=bool)
+
+    abs_diffs = []
+    for i in range(n_slices - 1):
+        s1 = vol[i][spatial_mask_2d]
+        s2 = vol[i + 1][spatial_mask_2d]
+        if s1.size == 0:
+            continue
+        abs_diffs.append(np.mean(np.abs(s2 - s1)))
+
+    if not abs_diffs:
+        return 0.0
+
+    mean_abs_diff = np.mean(abs_diffs)
+
+    # Normalise by the global foreground mean to make the metric scale-invariant
+    global_mean = vol[:, spatial_mask_2d].mean()
+    if global_mean == 0:
+        return 0.0
+
+    return float(mean_abs_diff / global_mean)

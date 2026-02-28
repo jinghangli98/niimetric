@@ -4,13 +4,21 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import nibabel as nib
 import numpy as np
 
 from .utils import load_nifti, validate_shapes, normalize_to_range
 from .cropping import auto_crop_volumes, get_crop_info
-from .metrics import compute_ssim, compute_psnr, compute_mae, compute_lpips, create_foreground_mask
+from .metrics import (
+    compute_ssim,
+    compute_psnr,
+    compute_mae,
+    compute_lpips,
+    compute_tsnr,
+    compute_flickering_index,
+    create_foreground_mask,
+)
 
 
 def parse_args(args: List[str] = None) -> argparse.Namespace:
@@ -30,8 +38,10 @@ Examples:
     # Required arguments
     parser.add_argument(
         "-a", "--reference",
-        required=True,
-        help="Path to reference NIfTI image (used for cropping boundaries)"
+        required=False,
+        default=None,
+        help="Path to reference NIfTI image (used for cropping boundaries). "
+             "Not needed for --tsnr / --flickering."
     )
     parser.add_argument(
         "-b", "--image",
@@ -67,6 +77,16 @@ Examples:
         help="Calculate Learned Perceptual Image Patch Similarity (LPIPS)"
     )
     metric_group.add_argument(
+        "--tsnr",
+        action="store_true",
+        help="Calculate Temporal SNR (no reference required)"
+    )
+    metric_group.add_argument(
+        "--flickering",
+        action="store_true",
+        help="Calculate Temporal Flickering Index (no reference required)"
+    )
+    metric_group.add_argument(
         "--all",
         action="store_true",
         help="Calculate all metrics"
@@ -97,55 +117,74 @@ Examples:
 
 
 def compute_metrics(
-    ref_cropped: any,
-    img_cropped: any,
-    mask: any = None,
+    img_cropped: np.ndarray,
+    ref_cropped: Optional[np.ndarray] = None,
+    mask: Optional[np.ndarray] = None,
     dim: int = 2,
     ssim: bool = False,
     psnr: bool = False,
     mae: bool = False,
     lpips: bool = False,
-    all_metrics: bool = False
+    tsnr: bool = False,
+    flickering: bool = False,
+    all_metrics: bool = False,
 ) -> List[Tuple[str, float]]:
     """
     Compute requested metrics on cropped volumes.
-    
+
+    Reference-based metrics (PSNR, SSIM, MAE, LPIPS) require ``ref_cropped``.
+    No-reference metrics (tSNR, flickering) operate on ``img_cropped`` alone.
+
     Args:
-        ref_cropped: Reference volume
-        img_cropped: Comparison volume
-        mask: Optional binary mask for foreground-only evaluation
-        dim: Dimension for slice-based evaluation (0=sagittal, 1=coronal, 2=axial)
-        
+        img_cropped:  Comparison / generated volume.
+        ref_cropped:  Reference volume (required for PSNR/SSIM/MAE/LPIPS).
+        mask:         Optional binary mask for foreground-only evaluation.
+        dim:          Dimension for slice-based evaluation.
+
     Returns:
-        List of (metric_name, value) tuples
+        List of (metric_name, value) tuples.
     """
     dim_names = {0: "sagittal", 1: "coronal", 2: "axial"}
     results = []
-    
-    if psnr or all_metrics:
+
+    # --- Reference-required metrics ---
+    if (psnr or all_metrics) and ref_cropped is not None:
         print("  Computing PSNR...", flush=True)
         value = compute_psnr(ref_cropped, img_cropped, mask=mask)
         results.append(("PSNR", value))
         print(f"    PSNR: {value:.4f} dB")
-    
-    if ssim or all_metrics:
+
+    if (ssim or all_metrics) and ref_cropped is not None:
         print(f"  Computing SSIM (on {dim_names[dim]} slices)...", flush=True)
         value = compute_ssim(ref_cropped, img_cropped, mask=mask, dim=dim)
         results.append(("SSIM", value))
         print(f"    SSIM: {value:.4f}")
-    
-    if mae or all_metrics:
+
+    if (mae or all_metrics) and ref_cropped is not None:
         print("  Computing MAE...", flush=True)
         value = compute_mae(ref_cropped, img_cropped, mask=mask)
         results.append(("MAE", value))
         print(f"    MAE: {value:.4f}")
-    
-    if lpips or all_metrics:
+
+    if (lpips or all_metrics) and ref_cropped is not None:
         print(f"  Computing LPIPS (on {dim_names[dim]} slices, this may take a while)...", flush=True)
         value = compute_lpips(ref_cropped, img_cropped, mask=mask, dim=dim)
         results.append(("LPIPS", value))
         print(f"    LPIPS: {value:.4f}")
-    
+
+    # --- No-reference temporal metrics ---
+    if tsnr or all_metrics:
+        print(f"  Computing tSNR (across {dim_names[dim]} slices)...", flush=True)
+        value = compute_tsnr(img_cropped, mask=mask, dim=dim)
+        results.append(("tSNR", value))
+        print(f"    tSNR: {value:.4f}")
+
+    if flickering or all_metrics:
+        print(f"  Computing Flickering Index (across {dim_names[dim]} slices)...", flush=True)
+        value = compute_flickering_index(img_cropped, mask=mask, dim=dim)
+        results.append(("FlickeringIndex", value))
+        print(f"    FlickeringIndex: {value:.4f}")
+
     return results
 
 
@@ -176,65 +215,79 @@ def write_csv(
 def main(args: List[str] = None) -> int:
     """Main entry point for the CLI."""
     parsed = parse_args(args)
-    
+
+    # Identify which metrics were requested
+    ref_metrics_requested = any([parsed.ssim, parsed.psnr, parsed.mae, parsed.lpips])
+    noref_metrics_requested = any([parsed.tsnr, parsed.flickering])
+
     # Check that at least one metric is selected
-    if not any([parsed.ssim, parsed.psnr, parsed.mae, parsed.lpips, parsed.all]):
-        print("Error: Please specify at least one metric (--ssim, --psnr, --mae, --lpips, or --all)")
+    if not any([parsed.ssim, parsed.psnr, parsed.mae, parsed.lpips,
+                parsed.tsnr, parsed.flickering, parsed.all]):
+        print(
+            "Error: Please specify at least one metric "
+            "(--ssim, --psnr, --mae, --lpips, --tsnr, --flickering, or --all)"
+        )
+        return 1
+
+    # Reference is required for reference-based metrics
+    if (ref_metrics_requested or parsed.all) and parsed.reference is None:
+        print("Error: -a/--reference is required for SSIM, PSNR, MAE, and LPIPS metrics.")
         return 1
     
     try:
-        # Load images
-        print(f"Loading reference: {parsed.reference}")
-        ref_data = load_nifti(parsed.reference)
-        print(f"  Shape: {ref_data.shape}")
-        
+        # Load image under evaluation
         print(f"Loading image: {parsed.image}")
         img_data = load_nifti(parsed.image)
         print(f"  Shape: {img_data.shape}")
-        
-        # Validate shapes
-        validate_shapes(ref_data, img_data)
-        
+
+        # Load reference only when needed
+        ref_data = None
+        if parsed.reference is not None:
+            print(f"Loading reference: {parsed.reference}")
+            ref_data = load_nifti(parsed.reference)
+            print(f"  Shape: {ref_data.shape}")
+            validate_shapes(ref_data, img_data)
+
         ref_final = ref_data
         img_final = img_data
         mask = None
         
         if parsed.foreground:
-            # Auto-crop based on reference
-            print("Auto-cropping volumes based on reference...")
-            ref_final, img_final, bbox = auto_crop_volumes(ref_data, img_data)
-            crop_info = get_crop_info(bbox, ref_data.shape)
-            print(f"  Original shape: {crop_info['original_shape']}")
-            print(f"  Cropped shape: {crop_info['cropped_shape']}")
-            print(f"  X range: {crop_info['x_range']}")
-            print(f"  Y range: {crop_info['y_range']}")
-            print(f"  Z range: {crop_info['z_range']}")
+            if ref_data is None:
+                print("Warning: --foreground requires a reference image (-a). Skipping cropping.")
+            else:
+                # Auto-crop based on reference
+                print("Auto-cropping volumes based on reference...")
+                ref_final, img_final, bbox = auto_crop_volumes(ref_data, img_data)
+                crop_info = get_crop_info(bbox, ref_data.shape)
+                print(f"  Original shape: {crop_info['original_shape']}")
+                print(f"  Cropped shape: {crop_info['cropped_shape']}")
+                print(f"  X range: {crop_info['x_range']}")
+                print(f"  Y range: {crop_info['y_range']}")
+                print(f"  Z range: {crop_info['z_range']}")
         else:
             print("Using full volumes (no cropping)...")
         
         # Normalize both images to 0-1 range
-        print("Normalizing images to 0-1 range...")
-        ref_normalized = normalize_to_range(ref_final, 0, 1)
+        print("Normalizing image to 0-1 range...")
         img_normalized = normalize_to_range(img_final, 0, 1)
-        print(f"  Reference range: [{ref_final.min():.2f}, {ref_final.max():.2f}] -> [0, 1]")
         print(f"  Image range: [{img_final.min():.2f}, {img_final.max():.2f}] -> [0, 1]")
+        ref_normalized = None
+        if ref_final is not None:
+            ref_normalized = normalize_to_range(ref_final, 0, 1)
+            print(f"  Reference range: [{ref_final.min():.2f}, {ref_final.max():.2f}] -> [0, 1]")
         
-        if parsed.foreground:
+        if parsed.foreground and ref_normalized is not None:
             # Create foreground mask (non-air regions based on reference)
             print("Creating foreground mask (excluding air regions)...")
             mask = create_foreground_mask(ref_normalized, threshold_ratio=0.1)
             fg_percentage = 100 * mask.sum() / mask.size
             print(f"  Foreground pixels: {mask.sum():,} / {mask.size:,} ({fg_percentage:.1f}%)")
-            
+
             # Save mask if requested
             if parsed.save_mask:
                 print(f"Saving mask to: {parsed.save_mask}")
-                # Load reference to get affine and header
                 ref_nii = nib.load(parsed.reference)
-                # We need to account for cropping if we want to save the mask in original space, 
-                # but illustrating the cropped mask is usually what's intended here or we'd need to un-crop.
-                # For simplicity and correctness with the metrics, let's save what was used.
-                # Note: The original code saved the mask which was cropped.
                 mask_nii = nib.Nifti1Image(mask.astype(np.uint8), ref_nii.affine, ref_nii.header)
                 nib.save(mask_nii, parsed.save_mask)
                 print(f"  Mask saved successfully")
@@ -247,18 +300,22 @@ def main(args: List[str] = None) -> int:
             print(f"Computing metrics on full volume (slicing on {dim_names[parsed.dim]} dimension)...")
             
         results = compute_metrics(
-            ref_normalized, img_normalized,
+            img_normalized,
+            ref_cropped=ref_normalized,
             mask=mask,
             dim=parsed.dim,
             ssim=parsed.ssim,
             psnr=parsed.psnr,
             mae=parsed.mae,
             lpips=parsed.lpips,
-            all_metrics=parsed.all
+            tsnr=parsed.tsnr,
+            flickering=parsed.flickering,
+            all_metrics=parsed.all,
         )
-        
+
         # Write to CSV
-        write_csv(parsed.output, parsed.reference, parsed.image, results)
+        ref_label = parsed.reference if parsed.reference else "(none)"
+        write_csv(parsed.output, ref_label, parsed.image, results)
         print(f"\nResults written to: {parsed.output}")
         
         return 0
