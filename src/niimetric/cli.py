@@ -95,7 +95,14 @@ Examples:
     parser.add_argument(
         "--foreground",
         action="store_true",
-        help="Evaluate metrics only on foreground regions (auto-cropped and masked)"
+        default=True,
+        help="Evaluate metrics only on foreground regions (auto-cropped and masked) [Default]"
+    )
+    parser.add_argument(
+        "--no-foreground",
+        action="store_false",
+        dest="foreground",
+        help="Evaluate metrics on the full volume instead of foreground only"
     )
     
     # Optional outputs
