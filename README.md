@@ -11,6 +11,7 @@ A Python CLI tool for evaluating image quality metrics between NIfTI (.nii/.nii.
 - **SSIM** - Structural Similarity Index (slice-based with configurable dimension)
 - **MAE** - Mean Absolute Error
 - **LPIPS** - Learned Perceptual Image Patch Similarity (slice-based)
+- **Image Augmentations** - Apply realistic noise, blur, bias field (inhomogeneity), motion, and ghosting artifacts.
 - **Auto-cropping** - Automatically crops to brain region based on reference image (30% mean threshold)
 - **Foreground masking** - Evaluates only on non-air regions (excludes background)
 - **Configurable slice dimension** - Evaluate on sagittal, coronal, or axial slices
@@ -55,6 +56,27 @@ niimetric -a reference.nii.gz -b image.nii.gz --all --dim 1 -o output.csv
 
 ```bash
 niimetric -a reference.nii.gz -b image.nii.gz --all -o output.csv --save-mask mask.nii.gz
+```
+
+### Image Augmentations (Artifact Generation)
+
+You can generate degraded NIfTI images using included augmentation scripts powered by TorchIO. All augmentations accept an input `-i`, output `-o`, and severity `-s` (1 to 5).
+
+```bash
+# Add random noise (mostly on brain)
+noise -i input.nii.gz -o noise_1.nii.gz -s 1
+
+# Add blur artifact
+blur -i input.nii.gz -o blur_3.nii.gz -s 3
+
+# Add bias field (inhomogeneity) artifact
+bias -i input.nii.gz -o bias_5.nii.gz -s 5
+
+# Add motion artifact
+motion -i input.nii.gz -o motion_2.nii.gz -s 2
+
+# Add ghosting artifact
+ghost -i input.nii.gz -o ghost_4.nii.gz -s 4
 ```
 
 ## Arguments

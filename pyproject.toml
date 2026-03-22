@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "niimetric"
-version = "0.1.6"
-description = "Evaluate image quality metrics (SSIM, MAE, LPIPS, PSNR) for NIfTI images"
+version = "0.1.7"
+description = "Evaluate image quality metrics (SSIM, MAE, LPIPS, PSNR) and add realistic artifacts/augmentations for NIfTI images"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Jinghang Li", email = "jinghang.li@pitt.edu"}
 ]
 requires-python = ">=3.8"
 classifiers = [
@@ -23,22 +23,27 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
-keywords = ["nifti", "mri", "image-quality", "ssim", "psnr", "lpips", "mae"]
+keywords = ["nifti", "mri", "image-quality", "ssim", "psnr", "lpips", "mae", "augmentation", "torchio", "noise"]
 dependencies = [
     "nibabel>=4.0.0",
     "numpy>=1.20.0",
     "scikit-image>=0.19.0",
     "torch>=1.9.0",
     "lpips>=0.1.4",
+    "torchio>=0.19.0",
 ]
 
 [project.scripts]
 niimetric = "niimetric.cli:main"
 noise = "niimetric.noise_cli:main"
+blur = "niimetric.blur_cli:main"
+bias = "niimetric.inhomogeneity_cli:main"
+motion = "niimetric.motion_cli:main"
+ghost = "niimetric.ghosting_cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/niimetric"
-Repository = "https://github.com/yourusername/niimetric"
+Homepage = "https://github.com/jinghangli98/niimetric"
+Repository = "https://github.com/jinghangli98/niimetric"
 
 [tool.setuptools.packages.find]
 where = ["src"]
