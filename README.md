@@ -11,7 +11,7 @@ A Python CLI tool for evaluating image quality metrics between NIfTI (.nii/.nii.
 - **SSIM** - Structural Similarity Index (slice-based with configurable dimension)
 - **MAE** - Mean Absolute Error
 - **LPIPS** - Learned Perceptual Image Patch Similarity (slice-based)
-- **Image Augmentations** - Apply realistic noise, blur, bias field (inhomogeneity), motion, and ghosting artifacts.
+- **Image Augmentations** - Apply realistic MRI noise (coil-based), standard Rician noise, blur, bias field, motion, ghosting, and GRAPPA artifacts.
 - **Auto-cropping** - Automatically crops to brain region based on reference image (30% mean threshold)
 - **Foreground masking** - Evaluates only on non-air regions (excludes background)
 - **Configurable slice dimension** - Evaluate on sagittal, coronal, or axial slices
@@ -65,6 +65,12 @@ You can generate degraded NIfTI images using included augmentation scripts power
 ```bash
 # Add random noise (mostly on brain)
 noise -i input.nii.gz -o noise_1.nii.gz -s 1
+
+# Add realistic coil-based noise (supports --coils and --dir)
+noise_robust -i input.nii.gz -o robust.nii.gz -s 3
+
+# Add GRAPPA reconstruction artifacts
+grappa -i input.nii.gz -o grappy.nii.gz -s 3
 
 # Add blur artifact
 blur -i input.nii.gz -o blur_3.nii.gz -s 3

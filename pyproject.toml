@@ -25,6 +25,7 @@ classifiers = [
 ]
 keywords = ["nifti", "mri", "image-quality", "ssim", "psnr", "lpips", "mae", "augmentation", "torchio", "noise"]
 dependencies = [
+    "scipy",
     "nibabel>=4.0.0",
     "numpy>=1.20.0",
     "scikit-image>=0.19.0",
@@ -35,11 +36,13 @@ dependencies = [
 
 [project.scripts]
 niimetric = "niimetric.cli:main"
+noise_robust = "niimetric.noise_robust_cli:main"
 noise = "niimetric.noise_cli:main"
 blur = "niimetric.blur_cli:main"
 bias = "niimetric.inhomogeneity_cli:main"
 motion = "niimetric.motion_cli:main"
 ghost = "niimetric.ghosting_cli:main"
+grappa = "niimetric.grappa_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/jinghangli98/niimetric"
