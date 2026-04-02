@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 import nibabel as nib
 import numpy as np
 
-from .utils import load_nifti, validate_shapes, normalize_to_range
+from .utils import load_nifti, validate_shapes, normalize_to_range, skull_strip
 from .cropping import auto_crop_volumes, get_crop_info
 from .metrics import (
     compute_ssim,
@@ -118,6 +118,21 @@ Examples:
         default=2,
         choices=[0, 1, 2],
         help="Dimension for slice-based evaluation: 0=sagittal, 1=coronal, 2=axial (default: 2)"
+    )
+    
+    parser.add_argument(
+        "--strip",
+        action="store_true",
+        default=False,
+        help="Apply SynthStrip skull stripping to both reference and image before computing metrics. "
+             "Uses the with-CSF model bundled with the package (no FreeSurfer required)."
+    )
+    parser.add_argument(
+        "--save-strip",
+        action="store_true",
+        default=False,
+        help="Save the skull-stripped images to the current directory as <basename>_stripped.nii.gz. "
+             "Implies --strip."
     )
     
     return parser.parse_args(args)
@@ -254,6 +269,43 @@ def main(args: List[str] = None) -> int:
             ref_data = load_nifti(parsed.reference)
             print(f"  Shape: {ref_data.shape}")
             validate_shapes(ref_data, img_data)
+
+        # Skull strip if requested (--save-strip implies --strip)
+        if parsed.strip or parsed.save_strip:
+            print("Applying SynthStrip skull stripping (with-CSF model)...")
+            img_nii = nib.load(parsed.image)
+            img_affine = img_nii.affine
+
+            print("  Stripping image...")
+            img_data = skull_strip(img_data, img_affine)
+
+            if parsed.save_strip:
+                img_stripped_name = Path(parsed.image).name.replace('.nii.gz', '') \
+                    .replace('.nii', '') + '_img_stripped.nii.gz'
+                img_stripped_path = Path.cwd() / img_stripped_name
+                nib.save(
+                    nib.Nifti1Image(img_data, img_affine, img_nii.header),
+                    str(img_stripped_path)
+                )
+                print(f"  Stripped image saved to: {img_stripped_path}")
+
+            if ref_data is not None:
+                ref_nii_obj = nib.load(parsed.reference)
+                ref_affine = ref_nii_obj.affine
+                print("  Stripping reference...")
+                ref_data = skull_strip(ref_data, ref_affine)
+
+                if parsed.save_strip:
+                    ref_stripped_name = Path(parsed.reference).name.replace('.nii.gz', '') \
+                        .replace('.nii', '') + '_ref_stripped.nii.gz'
+                    ref_stripped_path = Path.cwd() / ref_stripped_name
+                    nib.save(
+                        nib.Nifti1Image(ref_data, ref_affine, ref_nii_obj.header),
+                        str(ref_stripped_path)
+                    )
+                    print(f"  Stripped reference saved to: {ref_stripped_path}")
+
+            print("  Skull stripping complete.")
 
         ref_final = ref_data
         img_final = img_data

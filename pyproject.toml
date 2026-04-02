@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "niimetric"
-version = "0.1.9"
+version = "0.1.10"
 description = "Evaluate image quality metrics (SSIM, MAE, LPIPS, PSNR) and add realistic artifacts/augmentations for NIfTI images"
 readme = "README.md"
 license = {text = "MIT"}
@@ -32,6 +32,7 @@ dependencies = [
     "torch>=1.9.0",
     "lpips>=0.1.4",
     "torchio>=0.19.0",
+    "surfa>=0.4.0",
 ]
 
 [project.scripts]
@@ -50,3 +51,6 @@ Repository = "https://github.com/jinghangli98/niimetric"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+niimetric = ["models/*.pt"]
