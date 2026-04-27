@@ -12,11 +12,15 @@ from .utils import load_nifti, validate_shapes, normalize_to_range, skull_strip
 from .cropping import auto_crop_volumes, get_crop_info
 from .metrics import (
     compute_ssim,
+    compute_ms_ssim,
     compute_psnr,
     compute_mae,
     compute_lpips,
     compute_tsnr,
     compute_flickering_index,
+    compute_gmsd,
+    compute_vif,
+    compute_fsim,
     create_foreground_mask,
 )
 
@@ -87,6 +91,26 @@ Examples:
         help="Calculate Temporal Flickering Index (no reference required)"
     )
     metric_group.add_argument(
+        "--ms-ssim",
+        action="store_true",
+        help="Calculate Multi-Scale Structural Similarity (MS-SSIM)"
+    )
+    metric_group.add_argument(
+        "--gmsd",
+        action="store_true",
+        help="Calculate Gradient Magnitude Similarity Deviation (GMSD)"
+    )
+    metric_group.add_argument(
+        "--vif",
+        action="store_true",
+        help="Calculate Visual Information Fidelity (VIF)"
+    )
+    metric_group.add_argument(
+        "--fsim",
+        action="store_true",
+        help="Calculate Feature Similarity Index (FSIM, uses phase congruency + gradients)"
+    )
+    metric_group.add_argument(
         "--all",
         action="store_true",
         help="Calculate all metrics"
@@ -144,22 +168,26 @@ def compute_metrics(
     mask: Optional[np.ndarray] = None,
     dim: int = 2,
     ssim: bool = False,
+    ms_ssim: bool = False,
     psnr: bool = False,
     mae: bool = False,
     lpips: bool = False,
     tsnr: bool = False,
     flickering: bool = False,
+    gmsd: bool = False,
+    vif: bool = False,
+    fsim: bool = False,
     all_metrics: bool = False,
 ) -> List[Tuple[str, float]]:
     """
     Compute requested metrics on cropped volumes.
 
-    Reference-based metrics (PSNR, SSIM, MAE, LPIPS) require ``ref_cropped``.
+    Reference-based metrics require ``ref_cropped``.
     No-reference metrics (tSNR, flickering) operate on ``img_cropped`` alone.
 
     Args:
         img_cropped:  Comparison / generated volume.
-        ref_cropped:  Reference volume (required for PSNR/SSIM/MAE/LPIPS).
+        ref_cropped:  Reference volume (required for reference-based metrics).
         mask:         Optional binary mask for foreground-only evaluation.
         dim:          Dimension for slice-based evaluation.
 
@@ -182,6 +210,12 @@ def compute_metrics(
         results.append(("SSIM", value))
         print(f"    SSIM: {value:.4f}")
 
+    if (ms_ssim or all_metrics) and ref_cropped is not None:
+        print(f"  Computing MS-SSIM (on {dim_names[dim]} slices)...", flush=True)
+        value = compute_ms_ssim(ref_cropped, img_cropped, mask=mask, dim=dim)
+        results.append(("MS-SSIM", value))
+        print(f"    MS-SSIM: {value:.4f}")
+
     if (mae or all_metrics) and ref_cropped is not None:
         print("  Computing MAE...", flush=True)
         value = compute_mae(ref_cropped, img_cropped, mask=mask)
@@ -193,6 +227,24 @@ def compute_metrics(
         value = compute_lpips(ref_cropped, img_cropped, mask=mask, dim=dim)
         results.append(("LPIPS", value))
         print(f"    LPIPS: {value:.4f}")
+
+    if (gmsd or all_metrics) and ref_cropped is not None:
+        print(f"  Computing GMSD (on {dim_names[dim]} slices)...", flush=True)
+        value = compute_gmsd(ref_cropped, img_cropped, mask=mask, dim=dim)
+        results.append(("GMSD", value))
+        print(f"    GMSD: {value:.4f}")
+
+    if (vif or all_metrics) and ref_cropped is not None:
+        print(f"  Computing VIF (on {dim_names[dim]} slices)...", flush=True)
+        value = compute_vif(ref_cropped, img_cropped, mask=mask, dim=dim)
+        results.append(("VIF", value))
+        print(f"    VIF: {value:.4f}")
+
+    if (fsim or all_metrics) and ref_cropped is not None:
+        print(f"  Computing FSIM (on {dim_names[dim]} slices, this may take a while)...", flush=True)
+        value = compute_fsim(ref_cropped, img_cropped, mask=mask, dim=dim)
+        results.append(("FSIM", value))
+        print(f"    FSIM: {value:.4f}")
 
     # --- No-reference temporal metrics ---
     if tsnr or all_metrics:
@@ -239,12 +291,16 @@ def main(args: List[str] = None) -> int:
     parsed = parse_args(args)
 
     # Identify which metrics were requested
-    ref_metrics_requested = any([parsed.ssim, parsed.psnr, parsed.mae, parsed.lpips])
+    ref_metrics_requested = any([
+        parsed.ssim, parsed.ms_ssim, parsed.psnr, parsed.mae,
+        parsed.lpips, parsed.gmsd, parsed.vif, parsed.fsim,
+    ])
     noref_metrics_requested = any([parsed.tsnr, parsed.flickering])
 
     # Check that at least one metric is selected
-    if not any([parsed.ssim, parsed.psnr, parsed.mae, parsed.lpips,
-                parsed.tsnr, parsed.flickering, parsed.all]):
+    if not any([parsed.ssim, parsed.ms_ssim, parsed.psnr, parsed.mae, parsed.lpips,
+                parsed.tsnr, parsed.flickering, parsed.gmsd, parsed.vif, parsed.fsim,
+                parsed.all]):
         print(
             "Error: Please specify at least one metric "
             "(--ssim, --psnr, --mae, --lpips, --tsnr, --flickering, or --all)"
@@ -364,11 +420,15 @@ def main(args: List[str] = None) -> int:
             mask=mask,
             dim=parsed.dim,
             ssim=parsed.ssim,
+            ms_ssim=parsed.ms_ssim,
             psnr=parsed.psnr,
             mae=parsed.mae,
             lpips=parsed.lpips,
             tsnr=parsed.tsnr,
             flickering=parsed.flickering,
+            gmsd=parsed.gmsd,
+            vif=parsed.vif,
+            fsim=parsed.fsim,
             all_metrics=parsed.all,
         )
 

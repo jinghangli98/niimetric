@@ -2,7 +2,139 @@
 
 import numpy as np
 from skimage.metrics import structural_similarity, peak_signal_noise_ratio
+from scipy.ndimage import gaussian_filter as _gaussian_filter, convolve as _convolve
 from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+def _ssim_components_2d(img1: np.ndarray, img2: np.ndarray,
+                         data_range: float, sigma: float = 1.5):
+    """Return (ssim_map, cs_map) for a 2D image pair."""
+    C1 = (0.01 * data_range) ** 2
+    C2 = (0.03 * data_range) ** 2
+    img1 = img1.astype(np.float64)
+    img2 = img2.astype(np.float64)
+
+    mu1 = _gaussian_filter(img1, sigma=sigma, mode='reflect')
+    mu2 = _gaussian_filter(img2, sigma=sigma, mode='reflect')
+    mu1_sq, mu2_sq, mu12 = mu1 ** 2, mu2 ** 2, mu1 * mu2
+
+    sig1_sq = np.maximum(_gaussian_filter(img1 ** 2, sigma=sigma, mode='reflect') - mu1_sq, 0)
+    sig2_sq = np.maximum(_gaussian_filter(img2 ** 2, sigma=sigma, mode='reflect') - mu2_sq, 0)
+    sig12 = _gaussian_filter(img1 * img2, sigma=sigma, mode='reflect') - mu12
+
+    cs_map = (2 * sig12 + C2) / (sig1_sq + sig2_sq + C2)
+    ssim_map = ((2 * mu12 + C1) / (mu1_sq + mu2_sq + C1)) * cs_map
+    return ssim_map, cs_map
+
+
+def _gradient_magnitude_2d(img: np.ndarray) -> np.ndarray:
+    """Prewitt gradient magnitude for a 2D image."""
+    hx = np.array([[1, 0, -1], [1, 0, -1], [1, 0, -1]], dtype=np.float64) / 3.0
+    gx = _convolve(img.astype(np.float64), hx, mode='reflect')
+    gy = _convolve(img.astype(np.float64), hx.T, mode='reflect')
+    return np.sqrt(gx ** 2 + gy ** 2)
+
+
+def _phase_congruency_2d(img: np.ndarray, n_scales: int = 4,
+                          n_orientations: int = 4, min_wavelength: int = 6,
+                          mult: float = 2.0, sigma_on_f: float = 0.65) -> np.ndarray:
+    """
+    Phase congruency via log-Gabor filters (Kovesi 1999).
+    Returns a feature-strength map in [0, 1].
+    """
+    rows, cols = img.shape
+    img = img.astype(np.float64)
+
+    ux = np.fft.fftfreq(cols)
+    uy = np.fft.fftfreq(rows)
+    u, v = np.meshgrid(ux, uy)
+
+    radius = np.sqrt(u ** 2 + v ** 2)
+    radius[0, 0] = 1.0  # avoid log(0) at DC
+    theta_grid = np.arctan2(v, u)
+
+    log_sigma_sq = np.log(sigma_on_f) ** 2
+    angle_sigma = np.pi / (n_orientations * 1.5)
+
+    img_fft = np.fft.fft2(img)
+    PC = np.zeros((rows, cols))
+
+    for o in range(n_orientations):
+        theta_o = o * np.pi / n_orientations
+        d_theta = np.abs(np.mod(theta_grid - theta_o + np.pi / 2, np.pi) - np.pi / 2)
+        angular = np.exp(-d_theta ** 2 / (2 * angle_sigma ** 2))
+
+        E = np.zeros((rows, cols))
+        O = np.zeros((rows, cols))
+        A = np.zeros((rows, cols))
+
+        for s in range(n_scales):
+            f0 = 1.0 / (min_wavelength * mult ** s)
+            log_gabor = np.exp(-(np.log(radius / f0)) ** 2 / (2 * log_sigma_sq))
+            log_gabor[0, 0] = 0.0
+
+            response = np.fft.ifft2(img_fft * (log_gabor * angular))
+            e, o_resp = np.real(response), np.imag(response)
+            E += e
+            O += o_resp
+            A += np.sqrt(e ** 2 + o_resp ** 2)
+
+        PC = np.maximum(PC, np.sqrt(E ** 2 + O ** 2) / (A + 1e-5))
+
+    return PC
+
+
+def _vif_2d(ref: np.ndarray, img: np.ndarray,
+            sigma_nsq: float = 2.0 / 255.0 ** 2) -> float:
+    """
+    Scalar VIF for a 2D image pair (Sheikh & Bovik 2006).
+    Both images must be in [0, 1].
+    """
+    EPS = 1e-10
+    ref = ref.astype(np.float64)
+    img = img.astype(np.float64)
+
+    num_total = 0.0
+    den_total = 0.0
+    ref_cur, img_cur = ref.copy(), img.copy()
+
+    for scale in range(1, 5):
+        N = 2 ** (4 - scale + 1) + 1   # 17, 9, 5, 3
+        win_sigma = N / 5.0              # 3.4, 1.8, 1.0, 0.6
+
+        if scale > 1:
+            ref_cur = _gaussian_filter(ref_cur, sigma=win_sigma, mode='reflect')[::2, ::2]
+            img_cur = _gaussian_filter(img_cur, sigma=win_sigma, mode='reflect')[::2, ::2]
+
+        if min(ref_cur.shape) < 3:
+            break
+
+        mu1 = _gaussian_filter(ref_cur, sigma=0.6, mode='reflect')
+        mu2 = _gaussian_filter(img_cur, sigma=0.6, mode='reflect')
+        mu1_sq, mu2_sq, mu12 = mu1 ** 2, mu2 ** 2, mu1 * mu2
+
+        sig1_sq = np.maximum(
+            _gaussian_filter(ref_cur ** 2, sigma=0.6, mode='reflect') - mu1_sq, 0)
+        sig2_sq = np.maximum(
+            _gaussian_filter(img_cur ** 2, sigma=0.6, mode='reflect') - mu2_sq, 0)
+        sig12 = _gaussian_filter(ref_cur * img_cur, sigma=0.6, mode='reflect') - mu12
+
+        g = sig12 / (sig1_sq + EPS)
+        sv_sq = sig2_sq - g * sig12
+        sv_sq = np.where(g < 0, sig2_sq, sv_sq)
+        g = np.maximum(g, 0)
+        sv_sq = np.maximum(sv_sq, EPS)
+
+        num_total += np.sum(np.log10(1.0 + g ** 2 * sig1_sq / (sv_sq + sigma_nsq)))
+        den_total += np.sum(np.log10(1.0 + sig1_sq / sigma_nsq))
+
+    if den_total < EPS:
+        return 1.0
+    return float(num_total / den_total)
 
 
 def create_foreground_mask(ref: np.ndarray, threshold_ratio: float = 0.1) -> np.ndarray:
@@ -334,3 +466,234 @@ def compute_flickering_index(
         return 0.0
 
     return float(mean_abs_diff / global_mean)
+
+
+def compute_ms_ssim(ref: np.ndarray, img: np.ndarray,
+                    mask: Optional[np.ndarray] = None,
+                    data_range: Optional[float] = None,
+                    dim: int = 2) -> float:
+    """
+    Compute Multi-Scale Structural Similarity (MS-SSIM).
+
+    Evaluates SSIM across 5 resolution levels for better alignment with
+    human visual perception (Wang et al. 2003).
+
+    Args:
+        ref: Reference image
+        img: Comparison image
+        mask: Optional binary mask for foreground regions
+        data_range: Data range of the images. If None, computed from reference.
+        dim: Dimension for slice-based evaluation (0=sagittal, 1=coronal, 2=axial)
+
+    Returns:
+        MS-SSIM value between 0 and 1 (higher is better)
+    """
+    if data_range is None:
+        data_range = ref.max() - ref.min()
+
+    _WEIGHTS = np.array([0.0448, 0.2856, 0.3001, 0.2363, 0.1333])
+
+    def _ms_ssim_2d(r, i, m):
+        min_side = min(r.shape)
+        n = min(len(_WEIGHTS), max(1, int(np.log2(min_side / 11))))
+        w = _WEIGHTS[:n] / _WEIGHTS[:n].sum()
+
+        r_cur = r.astype(np.float64)
+        i_cur = i.astype(np.float64)
+        m_cur = m
+
+        cs_vals = []
+        for _ in range(n - 1):
+            _, cs_map = _ssim_components_2d(r_cur, i_cur, data_range)
+            region = cs_map[m_cur] if (m_cur is not None and m_cur.any()) else cs_map.ravel()
+            cs_vals.append(region.mean())
+            r_cur = _gaussian_filter(r_cur, sigma=0.5, mode='reflect')[::2, ::2]
+            i_cur = _gaussian_filter(i_cur, sigma=0.5, mode='reflect')[::2, ::2]
+            if m_cur is not None:
+                m_cur = m_cur[::2, ::2]
+
+        ssim_map, _ = _ssim_components_2d(r_cur, i_cur, data_range)
+        region = ssim_map[m_cur] if (m_cur is not None and m_cur.any()) else ssim_map.ravel()
+        cs_vals.append(region.mean())
+
+        result = 1.0
+        for j, val in enumerate(cs_vals):
+            result *= np.abs(val) ** w[j]
+        return float(result)
+
+    ms_ssim_values, weights = [], []
+    for i in range(ref.shape[dim]):
+        if dim == 0:
+            ref_s, img_s = ref[i, :, :], img[i, :, :]
+            mask_s = mask[i, :, :] if mask is not None else None
+        elif dim == 1:
+            ref_s, img_s = ref[:, i, :], img[:, i, :]
+            mask_s = mask[:, i, :] if mask is not None else None
+        else:
+            ref_s, img_s = ref[:, :, i], img[:, :, i]
+            mask_s = mask[:, :, i] if mask is not None else None
+
+        fg_count = int(np.sum(mask_s)) if mask_s is not None else ref_s.size
+        if fg_count < 49:
+            continue
+        ms_ssim_values.append(_ms_ssim_2d(ref_s, img_s, mask_s))
+        weights.append(fg_count)
+
+    if not ms_ssim_values:
+        return 0.0
+    return float(np.average(ms_ssim_values, weights=weights))
+
+
+def compute_gmsd(ref: np.ndarray, img: np.ndarray,
+                 mask: Optional[np.ndarray] = None,
+                 dim: int = 2) -> float:
+    """
+    Compute Gradient Magnitude Similarity Deviation (GMSD).
+
+    Uses the standard deviation of the per-pixel GMS map as a pooling
+    strategy (Xue et al. 2014). Lower values indicate higher quality.
+
+    Args:
+        ref: Reference image
+        img: Comparison image
+        mask: Optional binary mask for foreground regions
+        dim: Dimension for slice-based evaluation
+
+    Returns:
+        GMSD value (lower is better)
+    """
+    c = 0.0026  # stability constant calibrated for [0, 1] images
+
+    gmsd_values, weights = [], []
+    for i in range(ref.shape[dim]):
+        if dim == 0:
+            ref_s, img_s = ref[i, :, :], img[i, :, :]
+            mask_s = mask[i, :, :] if mask is not None else None
+        elif dim == 1:
+            ref_s, img_s = ref[:, i, :], img[:, i, :]
+            mask_s = mask[:, i, :] if mask is not None else None
+        else:
+            ref_s, img_s = ref[:, :, i], img[:, :, i]
+            mask_s = mask[:, :, i] if mask is not None else None
+
+        fg_count = int(np.sum(mask_s)) if mask_s is not None else ref_s.size
+        if fg_count < 49:
+            continue
+
+        gm_ref = _gradient_magnitude_2d(ref_s)
+        gm_img = _gradient_magnitude_2d(img_s)
+        gms = (2 * gm_ref * gm_img + c) / (gm_ref ** 2 + gm_img ** 2 + c)
+
+        region = gms[mask_s] if mask_s is not None else gms.ravel()
+        gmsd_values.append(float(np.std(region)))
+        weights.append(fg_count)
+
+    if not gmsd_values:
+        return 0.0
+    return float(np.average(gmsd_values, weights=weights))
+
+
+def compute_vif(ref: np.ndarray, img: np.ndarray,
+                mask: Optional[np.ndarray] = None,
+                dim: int = 2) -> float:
+    """
+    Compute Visual Information Fidelity (VIF).
+
+    Measures how much visual information from the reference is preserved
+    in the distorted image using natural scene statistics (Sheikh & Bovik 2006).
+    Values near 1.0 indicate no information loss; >1 possible for enhanced images.
+
+    Args:
+        ref: Reference image
+        img: Comparison image
+        mask: Optional binary mask for foreground regions
+        dim: Dimension for slice-based evaluation
+
+    Returns:
+        VIF value (higher is better; 1.0 = perfect fidelity)
+    """
+    vif_values, weights = [], []
+    for i in range(ref.shape[dim]):
+        if dim == 0:
+            ref_s, img_s = ref[i, :, :], img[i, :, :]
+            mask_s = mask[i, :, :] if mask is not None else None
+        elif dim == 1:
+            ref_s, img_s = ref[:, i, :], img[:, i, :]
+            mask_s = mask[:, i, :] if mask is not None else None
+        else:
+            ref_s, img_s = ref[:, :, i], img[:, :, i]
+            mask_s = mask[:, :, i] if mask is not None else None
+
+        fg_count = int(np.sum(mask_s)) if mask_s is not None else ref_s.size
+        if fg_count < 49:
+            continue
+        vif_values.append(_vif_2d(ref_s, img_s))
+        weights.append(fg_count)
+
+    if not vif_values:
+        return 0.0
+    return float(np.average(vif_values, weights=weights))
+
+
+def compute_fsim(ref: np.ndarray, img: np.ndarray,
+                 mask: Optional[np.ndarray] = None,
+                 dim: int = 2) -> float:
+    """
+    Compute Feature Similarity Index (FSIM).
+
+    Combines phase congruency and gradient magnitude similarity, giving
+    strong emphasis on edges and structural details (Zhang et al. 2011).
+
+    Args:
+        ref: Reference image
+        img: Comparison image
+        mask: Optional binary mask for foreground regions
+        dim: Dimension for slice-based evaluation
+
+    Returns:
+        FSIM value between 0 and 1 (higher is better)
+    """
+    T1 = 0.85                         # phase congruency stability constant
+    T2 = 160.0 / (255.0 ** 2)        # GM stability constant scaled for [0, 1] input
+
+    def _fsim_2d(ref_s, img_s, mask_s):
+        pc1 = _phase_congruency_2d(ref_s)
+        pc2 = _phase_congruency_2d(img_s)
+        gm1 = _gradient_magnitude_2d(ref_s)
+        gm2 = _gradient_magnitude_2d(img_s)
+
+        S_PC = (2 * pc1 * pc2 + T1) / (pc1 ** 2 + pc2 ** 2 + T1)
+        S_GM = (2 * gm1 * gm2 + T2) / (gm1 ** 2 + gm2 ** 2 + T2)
+        S_F = S_PC * S_GM
+        PC_m = np.maximum(pc1, pc2)
+
+        if mask_s is not None:
+            num = np.sum(PC_m[mask_s] * S_F[mask_s])
+            den = np.sum(PC_m[mask_s])
+        else:
+            num = np.sum(PC_m * S_F)
+            den = np.sum(PC_m)
+
+        return float(num / den) if den > 1e-10 else 1.0
+
+    fsim_values, weights = [], []
+    for i in range(ref.shape[dim]):
+        if dim == 0:
+            ref_s, img_s = ref[i, :, :], img[i, :, :]
+            mask_s = mask[i, :, :] if mask is not None else None
+        elif dim == 1:
+            ref_s, img_s = ref[:, i, :], img[:, i, :]
+            mask_s = mask[:, i, :] if mask is not None else None
+        else:
+            ref_s, img_s = ref[:, :, i], img[:, :, i]
+            mask_s = mask[:, :, i] if mask is not None else None
+
+        fg_count = int(np.sum(mask_s)) if mask_s is not None else ref_s.size
+        if fg_count < 49:
+            continue
+        fsim_values.append(_fsim_2d(ref_s, img_s, mask_s))
+        weights.append(fg_count)
+
+    if not fsim_values:
+        return 0.0
+    return float(np.average(fsim_values, weights=weights))
